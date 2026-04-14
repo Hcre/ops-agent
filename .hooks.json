@@ -1,0 +1,50 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "command": "python hooks/session_init.py",
+        "matcher": null,
+        "description": "加载跨 Session 记忆，初始化熔断器状态"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "command": "python hooks/pre_tool/01_injection_check.py",
+        "description": "检测提示词注入（exit 1 阻断，exit 0 继续）"
+      },
+      {
+        "matcher": "bash",
+        "command": "python hooks/pre_tool/02_blacklist_check.py",
+        "description": "绝对黑名单检查（rm -rf / 等，exit 1 阻断）"
+      },
+      {
+        "matcher": "*",
+        "command": "python hooks/pre_tool/03_risk_validator.py",
+        "description": "危险参数校验（exit 1=HIGH阻断，exit 2=注入警告）"
+      },
+      {
+        "matcher": "*",
+        "command": "python hooks/pre_tool/04_snapshot_hook.py",
+        "description": "执行前快照（exit 2 注入快照路径到上下文）"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "command": "python hooks/post_tool/01_audit_logger.py",
+        "description": "写 JSONL 审计记录（always exit 0）"
+      },
+      {
+        "matcher": "*",
+        "command": "python hooks/post_tool/02_circuit_check.py",
+        "description": "熔断状态检查（OPEN 时 exit 1 阻断后续调用）"
+      }
+    ]
+  },
+  "_exit_code_contract": {
+    "0": "继续执行",
+    "1": "阻断工具调用",
+    "2": "注入上下文消息（stdout 内容注入 LLM 对话）"
+  }
+}

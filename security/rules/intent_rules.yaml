@@ -1,0 +1,170 @@
+# 意图分类规则（可热更新，无需重启 Agent）
+# 格式：每条规则包含 patterns（关键词列表）、intent、risk_level
+# risk_level: LOW / MEDIUM / HIGH / CRITICAL
+
+rules:
+  # ── CRITICAL 级别（直接拒绝或必须确认）──────────────────────────
+  - id: "R001"
+    description: "系统级破坏性操作"
+    patterns:
+      - "rm -rf /"
+      - "格式化"
+      - "format disk"
+      - "delete all"
+      - "清空根目录"
+      - "fork bomb"
+    intent: "destructive_system_op"
+    risk_level: CRITICAL
+
+  - id: "R002"
+    description: "权限提升操作"
+    patterns:
+      - "sudo su"
+      - "chmod 777"
+      - "chown root"
+      - "提权"
+      - "privilege escalation"
+    intent: "privilege_escalation"
+    risk_level: CRITICAL
+
+  # ── HIGH 级别（需要二次确认）──────────────────────────────────────
+  - id: "R010"
+    description: "删除文件操作"
+    patterns:
+      - "删除文件"
+      - "remove file"
+      - "清理日志"
+      - "clean logs"
+      - "delete logs"
+      - "rm "
+    intent: "file_deletion"
+    risk_level: HIGH
+
+  - id: "R011"
+    description: "服务停止/重启"
+    patterns:
+      - "停止服务"
+      - "stop service"
+      - "restart"
+      - "重启"
+      - "kill process"
+      - "杀进程"
+    intent: "service_control"
+    risk_level: HIGH
+
+  - id: "R012"
+    description: "网络防火墙修改"
+    patterns:
+      - "iptables"
+      - "ufw"
+      - "防火墙"
+      - "firewall"
+      - "block port"
+      - "封端口"
+    intent: "network_config_change"
+    risk_level: HIGH
+
+  # ── MEDIUM 级别（默认模式下询问，auto 模式放行）──────────────────
+  - id: "R020"
+    description: "系统清理优化"
+    patterns:
+      - "清理垃圾"
+      - "清理系统"
+      - "disk cleanup"
+      - "free up space"
+      - "释放空间"
+    intent: "system_cleanup"
+    risk_level: MEDIUM
+
+  - id: "R021"
+    description: "配置文件修改"
+    patterns:
+      - "修改配置"
+      - "edit config"
+      - "update config"
+      - "改配置文件"
+    intent: "config_modification"
+    risk_level: MEDIUM
+
+  - id: "R022"
+    description: "用户账号管理"
+    patterns:
+      - "创建用户"
+      - "添加用户"
+      - "useradd"
+      - "passwd"
+      - "修改密码"
+    intent: "user_management"
+    risk_level: MEDIUM
+
+  # ── LOW 级别（所有模式下自动放行）──────────────────────────────────
+  - id: "R030"
+    description: "磁盘查看"
+    patterns:
+      - "查看磁盘"
+      - "磁盘使用"
+      - "disk usage"
+      - "df -h"
+      - "du -sh"
+      - "磁盘空间"
+    intent: "disk_inspection"
+    risk_level: LOW
+
+  - id: "R031"
+    description: "进程查看"
+    patterns:
+      - "查看进程"
+      - "查看 CPU"
+      - "进程列表"
+      - "process list"
+      - "ps aux"
+      - "top"
+      - "htop"
+    intent: "process_inspection"
+    risk_level: LOW
+
+  - id: "R032"
+    description: "网络状态查看"
+    patterns:
+      - "查看网络"
+      - "网络状态"
+      - "network status"
+      - "netstat"
+      - "ss -tuln"
+      - "端口占用"
+    intent: "network_inspection"
+    risk_level: LOW
+
+  - id: "R033"
+    description: "日志查看"
+    patterns:
+      - "查看日志"
+      - "查看 log"
+      - "journalctl"
+      - "tail log"
+      - "分析日志"
+    intent: "log_inspection"
+    risk_level: LOW
+
+  - id: "R034"
+    description: "系统信息查询"
+    patterns:
+      - "系统信息"
+      - "内存使用"
+      - "memory usage"
+      - "free -h"
+      - "uptime"
+      - "系统状态"
+    intent: "system_info"
+    risk_level: LOW
+
+# 未命中规则时的兜底行为
+fallback:
+  # UNKNOWN 意图 → 发送给安全审查员 LLM 做二次判断
+  risk_level: UNKNOWN
+  action: llm_review
+  reviewer_model: "${SECURITY_REVIEWER_MODEL}"
+  reviewer_prompt: |
+    你是运维安全审查员。请判断以下用户指令的风险级别。
+    只输出 JSON：{"risk_level": "LOW|MEDIUM|HIGH|CRITICAL", "reason": "简短理由"}
+    用户指令：{user_input}
