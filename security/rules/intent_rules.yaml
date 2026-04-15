@@ -1,170 +1,119 @@
-# 意图分类规则（可热更新，无需重启 Agent）
-# 格式：每条规则包含 patterns（关键词列表）、intent、risk_level
-# risk_level: LOW / MEDIUM / HIGH / CRITICAL
+# 意图分类规则 (Compiled Version)
+# 优先级：CRITICAL > HIGH > MEDIUM
+# 原则：宁错扫（早期预警），不漏扫
 
 rules:
-  # ── CRITICAL 级别（直接拒绝或必须确认）──────────────────────────
+  # ── CRITICAL 级别：毁灭性、全系统劫持 ────────────────────────────
   - id: "R001"
-    description: "系统级破坏性操作"
+    description: "毁灭性系统破坏（不可逆）"
     patterns:
-      - "rm -rf /"
-      - "格式化"
-      - "format disk"
-      - "delete all"
-      - "清空根目录"
-      - "fork bomb"
+      - "rm\\s+-rf\\s+/(\\s|$)"          # 根目录删除（严格匹配）
+      - "rm\\s+-rf\\s+.*--no-preserve-root"
+      - "格式化.{0,10}(磁盘|硬盘|分区|驱动器|C盘|D盘)"
+      - "\\b(format|mkfs|fdisk|parted)\\b.*(disk|drive|partition|/dev/)"
+      - "dd\\s+if=.*of=/dev/(sd|nvme|mmc|vd)" # 危险的 dd 写入
+      - "清空.{0,5}(根目录|整个磁盘|系统)"
+      - "fork\\s*bomb|:\\(\\)\\s*\\{.*:\\|:.*\\}"
+      - "\\b(shred|wipe)\\b.*(/dev/|/home|/etc|/var)"
+      - "重置.{0,5}(出厂设置|主引导记录|MBR)"
     intent: "destructive_system_op"
     risk_level: CRITICAL
 
   - id: "R002"
-    description: "权限提升操作"
+    description: "越权与权限持久化（提权）"
     patterns:
-      - "sudo su"
-      - "chmod 777"
-      - "chown root"
-      - "提权"
-      - "privilege escalation"
+      - "sudo\\s+(su|i|s|sh|bash)\\b"    # 试图开启交互式 root shell
+      - "chmod\\s+([4-7]77[0-7]?|\\+x).*\\b(etc|root|boot|bin|sbin)\\b" # 敏感路径高权限
+      - "\\b(visudo|pkexec|setuid)\\b"
+      - "(提升|修改|获取|破解).{0,5}(权限|root|管理员)"
+      - "修改.{0,10}(shadow|passwd|sudoers|authorized_keys)"
+      - "privilege\\s+escalation|jailbreak"
     intent: "privilege_escalation"
     risk_level: CRITICAL
 
-  # ── HIGH 级别（需要二次确认）──────────────────────────────────────
-  - id: "R010"
-    description: "删除文件操作"
+  - id: "R003"
+    description: "内核与底层驱动破坏"
     patterns:
-      - "删除文件"
-      - "remove file"
-      - "清理日志"
-      - "clean logs"
-      - "delete logs"
-      - "rm "
+      - "\\brmmod\\b|\\bmodprobe\\s+-r\\b" # 卸载内核模块
+      - "编译.{0,5}内核"
+      - "写入.{0,10}(/dev/mem|/dev/kmem)"
+      - "修改.{0,10}(grub|bootloader|引导菜单)"
+    intent: "kernel_level_manipulation"
+    risk_level: CRITICAL
+
+  # ── HIGH 级别：数据丢失风险、业务长时间中断 ───────────────────────
+  - id: "R010"
+    description: "高风险文件删除/清理"
+    patterns:
+      - "\\b(rm|remove|delete|shred)\\s+.*"
+      - "删除|清除|删掉|移除|彻底清理"
+      - "清理.{0,10}(日志|log|缓存|cache|数据|db|database|备份|backup)"
+      - "清空.{0,10}(日志|log|目录|文件夹|表)"
+      - "truncate\\s+table"
     intent: "file_deletion"
     risk_level: HIGH
 
   - id: "R011"
-    description: "服务停止/重启"
+    description: "系统停机/重启/强杀进程"
     patterns:
-      - "停止服务"
-      - "stop service"
-      - "restart"
-      - "重启"
-      - "kill process"
-      - "杀进程"
+      - "\\b(reboot|shutdown|halt|poweroff|init 0)\\b"
+      - "重启.{0,10}(系统|服务器|主机)"
+      - "关机|停机|下线"
+      - "\\b(kill|pkill|killall)\\b.*-9" # 强制杀进程
+      - "systemctl\\s+(stop|kill|terminate)"
+      - "停止.{0,15}(服务|进程|程序|引擎)"
+      - "杀.{0,5}(进程|服务|程序)"
     intent: "service_control"
     risk_level: HIGH
 
   - id: "R012"
-    description: "网络防火墙修改"
+    description: "网络劫持/防火墙切断"
     patterns:
-      - "iptables"
-      - "ufw"
-      - "防火墙"
-      - "firewall"
-      - "block port"
-      - "封端口"
+      - "\\b(iptables|ufw|firewall-cmd|nftables)\\b.*(flush|stop|disable|F|X)"
+      - "关闭.{0,10}(防火墙|安全组|策略)"
+      - "封.{0,5}(端口|IP)"
+      - "开放.{0,5}(全部端口|所有端口|0\\.0\\.0\\.0)"
+      - "修改.{0,10}(路由表|dns|nameserver)"
     intent: "network_config_change"
     risk_level: HIGH
 
-  # ── MEDIUM 级别（默认模式下询问，auto 模式放行）──────────────────
+  # ── MEDIUM 级别：配置变动、软件环境变更 ─────────────────────────
   - id: "R020"
-    description: "系统清理优化"
+    description: "软件卸载/环境变更"
     patterns:
-      - "清理垃圾"
-      - "清理系统"
-      - "disk cleanup"
-      - "free up space"
-      - "释放空间"
-    intent: "system_cleanup"
+      - "\\b(apt|yum|dnf|pip|npm|docker)\\b.*(remove|uninstall|purge|rm)"
+      - "卸载.{0,15}(软件|包|框架|库)"
+      - "清理.{0,15}(磁盘|垃圾|未使用的资源)"
+      - "\\bautoremove\\b"
+    intent: "software_removal"
     risk_level: MEDIUM
 
   - id: "R021"
-    description: "配置文件修改"
+    description: "配置文件写入/敏感编辑器开启"
     patterns:
-      - "修改配置"
-      - "edit config"
-      - "update config"
-      - "改配置文件"
+      - "(修改|编辑|更新|写入|改).{0,15}(配置|环境变量|env|profile|bashrc)"
+      - "\\b(vi|vim|nano|ed)\\b.*/etc/" # 试图编辑系统配置
+      - "edit\\s+config|update\\s+config"
+      - "写入.{0,10}(crontab|定时任务)"
     intent: "config_modification"
     risk_level: MEDIUM
 
   - id: "R022"
-    description: "用户账号管理"
+    description: "账号/密码/密钥变动"
     patterns:
-      - "创建用户"
-      - "添加用户"
-      - "useradd"
-      - "passwd"
-      - "修改密码"
+      - "(创建|添加|新建|删除|修改).{0,10}(用户|账号|密码|密钥)"
+      - "\\b(useradd|userdel|groupadd|passwd)\\b"
+      - "修改.{0,10}密码"
+      - "更换.{0,10}公钥"
     intent: "user_management"
     risk_level: MEDIUM
 
-  # ── LOW 级别（所有模式下自动放行）──────────────────────────────────
-  - id: "R030"
-    description: "磁盘查看"
+  - id: "R023"
+    description: "服务重载/单点重启"
     patterns:
-      - "查看磁盘"
-      - "磁盘使用"
-      - "disk usage"
-      - "df -h"
-      - "du -sh"
-      - "磁盘空间"
-    intent: "disk_inspection"
-    risk_level: LOW
-
-  - id: "R031"
-    description: "进程查看"
-    patterns:
-      - "查看进程"
-      - "查看 CPU"
-      - "进程列表"
-      - "process list"
-      - "ps aux"
-      - "top"
-      - "htop"
-    intent: "process_inspection"
-    risk_level: LOW
-
-  - id: "R032"
-    description: "网络状态查看"
-    patterns:
-      - "查看网络"
-      - "网络状态"
-      - "network status"
-      - "netstat"
-      - "ss -tuln"
-      - "端口占用"
-    intent: "network_inspection"
-    risk_level: LOW
-
-  - id: "R033"
-    description: "日志查看"
-    patterns:
-      - "查看日志"
-      - "查看 log"
-      - "journalctl"
-      - "tail log"
-      - "分析日志"
-    intent: "log_inspection"
-    risk_level: LOW
-
-  - id: "R034"
-    description: "系统信息查询"
-    patterns:
-      - "系统信息"
-      - "内存使用"
-      - "memory usage"
-      - "free -h"
-      - "uptime"
-      - "系统状态"
-    intent: "system_info"
-    risk_level: LOW
-
-# 未命中规则时的兜底行为
-fallback:
-  # UNKNOWN 意图 → 发送给安全审查员 LLM 做二次判断
-  risk_level: UNKNOWN
-  action: llm_review
-  reviewer_model: "${SECURITY_REVIEWER_MODEL}"
-  reviewer_prompt: |
-    你是运维安全审查员。请判断以下用户指令的风险级别。
-    只输出 JSON：{"risk_level": "LOW|MEDIUM|HIGH|CRITICAL", "reason": "简短理由"}
-    用户指令：{user_input}
+      - "重启.{0,15}(服务|nginx|mysql|redis|apache|php|docker)"
+      - "restart.{0,15}service"
+      - "systemctl\\s+(restart|reload)"
+      - "service\\s+.*\\s+restart"
+    intent: "service_restart"
+    risk_level: MEDIUM
