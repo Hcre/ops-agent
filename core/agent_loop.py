@@ -288,9 +288,16 @@ class AgentLoop:
         """OS 环境感知，返回注入 system prompt 的文本片段。"""
         try:
             result = await self._perception_agg.snapshot()
-            # 粗估 context 使用率：消息数 / (max_turns * 10)
             usage_ratio = min(len(state.messages) / max(self.config.max_turns * 10, 1), 1.0)
-            return self._perception_agg.build_prompt_section(result, usage_ratio)
+            section = self._perception_agg.build_prompt_section(result, usage_ratio)
+            # 调试：显示感知结果
+            if result.alerts:
+                for alert in result.alerts:
+                    self._ui.console.print(
+                        f"[dim]👁 [Perception/{alert.level}][/dim] "
+                        f"[dim]{alert.message}[/dim]"
+                    )
+            return section
         except Exception as e:
             self._ui.print_error(f"感知失败: {e}")
             return ""
@@ -389,8 +396,10 @@ class AgentLoop:
         except json.JSONDecodeError:
             tool_args = {}
 
-        # Week 2: PermissionManager 权限检查
+        # PermissionManager 权限检查（可视化决策）
         decision = ctx.permission_mgr.check(tool_name, tool_args)
+        self._ui.print_permission_decision(tool_name, decision)
+
         if decision.behavior == "deny":
             return ToolResult(
                 tool_call_id=tool_call.id,
@@ -401,7 +410,6 @@ class AgentLoop:
             )
 
         if decision.behavior == "ask":
-            # 实际应该询问用户，这里简化为拒绝
             return ToolResult(
                 tool_call_id=tool_call.id,
                 tool_name=tool_name,
@@ -423,11 +431,13 @@ class AgentLoop:
 
         t0 = time.monotonic()
         try:
-            result = await handler(**tool_args)
+            with self._ui.tool_execution_tracker(tool_name, tool_args) as tracker:
+                result = await handler(**tool_args)
             elapsed_ms = (time.monotonic() - t0) * 1000
 
-            # 工具可能返回 ToolResult（exec_bash/read_file/list_dir）或原始字符串
+            # 工具可能返回 ToolResult 或原始字符串
             if isinstance(result, ToolResult):
+                tracker.set_result(result)
                 if not result.success:
                     return ToolResult(
                         tool_call_id=tool_call.id,
