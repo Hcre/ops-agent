@@ -88,17 +88,19 @@ async def get_disk_detail(path: str = "/", mode: Mode = "summary") -> ToolResult
     if not ok_df:
         return _result("get_disk_detail", t0, False, "", f"df 失败: {df_out}")
 
-    # Top 10 目录（--one-file-system 防止跨挂载点卡死）
-    if mount == "/":
+    # WSL 下 /mnt/ 是 Windows drvfs，du 扫描极慢，直接跳过 Top 目录
+    if mount.startswith("/mnt/"):
+        du_out = "（跳过：/mnt/ 为 Windows 文件系统，du 扫描不适用）"
+    elif mount == "/":
         du_cmd = (
             "du -h --max-depth=1 --one-file-system / 2>/dev/null"
-            " | grep -v -E '^[0-9.]+[KMGTPEZYkMGTPEZY]?\\s+/(proc|sys|dev|run)$'"
+            " | grep -v -E '^[0-9.]+[KMGTPEZYkMGTPEZY]?\\s+/(proc|sys|dev|run|mnt)$'"
             " | sort -hr | head -n 10"
         )
+        _, du_out, _ = await _run(du_cmd, timeout=10)
     else:
         du_cmd = f"du -h --max-depth=1 --one-file-system {safe_mount} 2>/dev/null | sort -hr | head -n 10"
-
-    _, du_out, _ = await _run(du_cmd, timeout=10)
+        _, du_out, _ = await _run(du_cmd, timeout=10)
 
     sections = [
         f"--- 空间 + Inode (挂载点: {mount}) ---\n{df_out}",

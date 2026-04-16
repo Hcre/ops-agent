@@ -131,15 +131,17 @@ class PerceptionAggregator:
     # 保留旧接口兼容
     def to_dict(self, result: PerceptionResult) -> dict:
         return {
-            "timestamp": result.timestamp,
-            "has_change": result.has_change,
+            "timestamp":   result.timestamp,
+            "has_change":  result.has_change,
             "alerts": [
                 {
-                    "level": a.level,
-                    "category": a.category,
-                    "message": a.message,
+                    "level":           a.level,
+                    "category":        a.category,
+                    "message":         a.message,
+                    "fingerprint":     a.fingerprint,
                     "suggested_tools": a.suggested_tools,
                 }
                 for a in result.alerts
             ],
+            "all_alerts_count": len(result.all_alerts),
         }

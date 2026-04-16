@@ -144,6 +144,12 @@ ENV/
 env.bak/
 venv.bak/
 
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+
 # Spyder project settings
 .spyderproject
 .spyproject

@@ -166,7 +166,7 @@ class Collector:
                 continue
             try:
                 mount = parts[4]
-                if any(mount.startswith(p) for p in ("/proc", "/sys", "/dev", "/run")):
+                if any(mount.startswith(p) for p in ("/proc", "/sys", "/dev", "/run", "/mnt")):
                     continue
                 d = DiskRaw(
                     mount=mount,
