@@ -40,19 +40,71 @@ class PermissionManager:
         self._mode = mode
 
     def check(self, tool_name: str, tool_args: dict) -> PermissionDecision:
-        """4 步决策管道（Week 1 stub：全部 allow）。
+        """4 步决策管道。
 
-        完整管道（Week 2 实现）：
         Step 1: deny_rules — 绝对黑名单
         Step 2: mode_check — plan 模式拒绝写操作
         Step 3: allow_rules — 只读命令自动放行
         Step 4: ask_user   — 其余操作询问用户
         """
-        # TODO Week 2: 实现真实的 4 步管道
+        # 提取命令（仅支持 exec_bash）
+        if tool_name != "exec_bash":
+            return PermissionDecision(
+                behavior="allow",
+                reason=f"Non-bash tool: {tool_name}",
+                risk_level="LOW",
+            )
+
+        cmd = tool_args.get("cmd", "").strip()
+        if not cmd:
+            return PermissionDecision(
+                behavior="deny",
+                reason="Empty command",
+                risk_level="LOW",
+            )
+
+        # Step 1: 绝对黑名单检查
+        if self._is_blacklisted(cmd):
+            return PermissionDecision(
+                behavior="deny",
+                reason=f"Command in absolute blacklist",
+                risk_level="CRITICAL",
+            )
+
+        # 分类风险等级
+        risk_level = self._classify_risk(cmd)
+
+        # Step 2: plan 模式检查（仅允许只读）
+        if self._mode == "plan":
+            if risk_level != "LOW":
+                return PermissionDecision(
+                    behavior="deny",
+                    reason="Plan mode: write operations not allowed",
+                    risk_level=risk_level,
+                )
+
+        # Step 3: 只读命令自动放行
+        if risk_level == "LOW":
+            return PermissionDecision(
+                behavior="allow",
+                reason="Read-only command",
+                risk_level="LOW",
+            )
+
+        # Step 4: 其余操作询问用户
+        # 在 auto 模式下，非高危写操作自动放行
+        if self._mode == "auto" and risk_level == "MEDIUM":
+            return PermissionDecision(
+                behavior="allow",
+                reason="Auto mode: medium-risk operation auto-allowed",
+                risk_level="MEDIUM",
+            )
+
+        # 默认询问用户
         return PermissionDecision(
-            behavior="allow",
-            reason="[stub] Week 1 全部放行",
-            risk_level="LOW",
+            behavior="ask",
+            reason=f"User confirmation required for {risk_level} operation",
+            risk_level=risk_level,
         )
 
     def _is_blacklisted(self, cmd: str) -> bool:

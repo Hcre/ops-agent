@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     from security.intent_classifier import IntentClassifier, IntentResult
     from security.permission_manager import PermissionManager
     from security.prompt_injection import PromptInjectionDetector
+    from managers.task_manager import TaskManager
+    from perception.aggregator import PerceptionAggregator
+    from core.error_recovery import ErrorRecovery
 
 # ---------------------------------------------------------------------------
 # QueryState / LoopState（s00a / s00c）
@@ -79,7 +82,7 @@ class ToolResult:
     op_id:          str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     elapsed_ms:     float = 0.0            # 执行耗时（Week 4 审计用）
     exit_code:      int = 0                # 原始退出码（Week 4 审计用）
-
+    
     def to_llm_message(self) -> dict:
         """转成 OpenAI tool message 格式，注入 messages 列表。"""
         content = self.output if self.success else f"[错误] {self.error}"
@@ -106,6 +109,11 @@ class ToolUseContext:
     notifications:  list[str]              # hook exit 2 注入的消息
     cwd:            str = "."
 
+    # Week 2: 错误恢复 + 感知 + 任务管理
+    error_recovery: "ErrorRecovery" = None
+    perception_agg: "PerceptionAggregator" = None
+    task_mgr:       "TaskManager" = None
+
     # Week 3+: MCP 路由器（s19）
     # 所有 MCP 工具走同一权限门，不绕过 permission_mgr
     mcp_router:     object = None           # MCPRouter（Week 3）
@@ -116,7 +124,6 @@ class ToolUseContext:
 
     # Week 5+: 熔断 + 任务
     breaker:        object = None           # CircuitBreaker（Week 5）
-    task_mgr:       object = None           # TaskManager（Week 5）
 
     # Week 6+: 快照回滚
     snapshot:       object = None           # Snapshot（Week 6）
@@ -154,6 +161,10 @@ class AgentLoop:
         from core.hook_manager import HookManager
         from core.system_prompt import SystemPromptBuilder
         from core import ui
+        from tools.registry import ToolRegistry
+        from managers.task_manager import TaskManager
+        from perception.aggregator import PerceptionAggregator
+        from core.error_recovery import ErrorRecovery
 
         self._injection = PromptInjectionDetector()
         self._intent = IntentClassifier(config)
@@ -162,9 +173,15 @@ class AgentLoop:
         self._prompt_builder = SystemPromptBuilder(config)
         self._ui = ui
 
+        # Week 2 组件
+        self._task_mgr = TaskManager(config)
+        self._perception_agg = PerceptionAggregator(config)
+        self._error_recovery = ErrorRecovery(config)
+
         # 工具注册表（Week 2+ 填充）
-        self._tool_handlers: dict = {}
-        self._tool_schemas: list[dict] = []
+        registry = ToolRegistry()
+        self._tool_handlers = registry.handlers
+        self._tool_schemas = registry.get_schemas()
 
     # ------------------------------------------------------------------
     # 公开入口
@@ -225,7 +242,7 @@ class AgentLoop:
         """处理单条用户输入，返回最终回答。"""
         # Phase 1: 输入防御
         intent_result = await self._phase1_defend(user_input, state)
-        if intent_result is False:
+        if not intent_result:
             return "输入被安全检查拦截。"
 
         # Phase 2: 环境感知（Week 3 填充真实感知）
@@ -248,41 +265,35 @@ class AgentLoop:
 
     async def _phase1_defend(
         self, user_input: str, state: LoopState
-    ) -> "IntentResult | None | Literal[False]":
-        """注入检测 + 意图分类。
+    ) -> bool:
+        """输入防御：只做注入检测。
 
-        返回值：
-          False        → 已阻断，拒绝处理
-          None         → 对话型输入，无操作意图，直接放行
-          IntentResult → 检测到操作意图，按 risk_level 处理
+        返回 False → 已阻断
+        返回 True  → 放行
+
+        意图分类已移至 tool_call 层（PermissionManager），
+        用户自然语言层规则库误报率高，无实际价值。
         """
-        # 注入检测（三层）
         inj = self._injection.check(user_input)
         self._ui.print_injection_result(inj)
         if inj.verdict == "INJECTED":
             return False
-        # SUSPICIOUS：告警但不硬阻断，让意图分类器再判断一次
-        # Week 2+: 可选送 LLM 审查员做 Layer 3 确认
-
-        # 意图分类（对话型输入返回 None，直接放行）
-        result = await self._intent.classify(user_input)
-        if result is not None:
-            self._ui.print_intent_result(result)
-            if result.risk_level == "CRITICAL":
-                confirmed = await self._cli_confirm_intent(user_input, result)
-                if not confirmed:
-                    return False
-
-        return result
+        return True
 
     # ------------------------------------------------------------------
     # Phase 2: 环境感知
     # ------------------------------------------------------------------
 
-    async def _phase2_perceive(self, state: LoopState) -> dict:
-        """OS 环境感知（Week 3 填充真实感知模块）。"""
-        # stub：返回空感知上下文
-        return {}
+    async def _phase2_perceive(self, state: LoopState) -> str:
+        """OS 环境感知，返回注入 system prompt 的文本片段。"""
+        try:
+            result = await self._perception_agg.snapshot()
+            # 粗估 context 使用率：消息数 / (max_turns * 10)
+            usage_ratio = min(len(state.messages) / max(self.config.max_turns * 10, 1), 1.0)
+            return self._perception_agg.build_prompt_section(result, usage_ratio)
+        except Exception as e:
+            self._ui.print_error(f"感知失败: {e}")
+            return ""
 
     # ------------------------------------------------------------------
     # Phase 3: LLM 推理（含 tool_use 循环）
@@ -301,7 +312,7 @@ class AgentLoop:
                 response = await self._llm_call(system_prompt, state.messages)
 
             #response = await self._llm_call(system_prompt, state.messages)
-            choice = response.choices[0]
+            choice = response.choices[0]    
             finish_reason = choice.finish_reason
 
             # 将 assistant 消息加入历史
@@ -322,7 +333,7 @@ class AgentLoop:
                 ]
             state.messages.append(assistant_msg)
 
-            #结束理由用if判断不够优雅
+
             if finish_reason == "stop" or finish_reason == "end_turn":
                 return choice.message.content or ""
 
@@ -357,8 +368,10 @@ class AgentLoop:
         """处理所有 tool_call，结果直接追加到 ctx.messages。"""
         for tc in tool_calls:
             result = await self._handle_single_tool(tc, ctx)
-            # ToolResult → LLM message，中间可插入审计/熔断（Week 4+）
             ctx.messages.append(result.to_llm_message())
+            # 工具执行后重置感知基线，让下次感知能对比到变化
+            if ctx.perception_agg is not None:
+                ctx.perception_agg.reset_baseline()
             # hook exit 2 注入的消息也追加进去
             for note in ctx.notifications:
                 ctx.messages.append({"role": "user", "content": f"[Hook]: {note}"})
@@ -367,8 +380,8 @@ class AgentLoop:
     async def _handle_single_tool(self, tool_call, ctx: ToolUseContext) -> ToolResult:
         """单个 tool_call 的完整安全管道，返回 ToolResult。
 
-        完整管道（Week 2+ 逐步填充）：
-        PreToolUse Hooks → PermissionManager → CircuitBreaker → PrivilegeBroker → PostToolUse Hooks
+        完整管道（Week 2 实现）：
+        PermissionManager → 工具执行 → 错误恢复 → 输出检测
         """
         tool_name = tool_call.function.name
         try:
@@ -376,7 +389,28 @@ class AgentLoop:
         except json.JSONDecodeError:
             tool_args = {}
 
-        # Week 1 stub：直接查找 handler 执行，无安全检查
+        # Week 2: PermissionManager 权限检查
+        decision = ctx.permission_mgr.check(tool_name, tool_args)
+        if decision.behavior == "deny":
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                tool_name=tool_name,
+                success=False,
+                output="",
+                error=f"权限拒绝: {decision.reason}",
+            )
+
+        if decision.behavior == "ask":
+            # 实际应该询问用户，这里简化为拒绝
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                tool_name=tool_name,
+                success=False,
+                output="",
+                error=f"需要用户确认: {decision.reason}",
+            )
+
+        # 查找 handler
         handler = ctx.handlers.get(tool_name)
         if handler is None:
             return ToolResult(
@@ -389,8 +423,24 @@ class AgentLoop:
 
         t0 = time.monotonic()
         try:
-            output = await handler(tool_args)
-            raw_output = str(output)
+            result = await handler(**tool_args)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+
+            # 工具可能返回 ToolResult（exec_bash/read_file/list_dir）或原始字符串
+            if isinstance(result, ToolResult):
+                if not result.success:
+                    return ToolResult(
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_name,
+                        success=False,
+                        output="",
+                        error=result.error,
+                        elapsed_ms=elapsed_ms,
+                        exit_code=result.exit_code,
+                    )
+                raw_output = result.output
+            else:
+                raw_output = str(result)
 
             # 间接注入检测：工具输出可能被攻击者污染（日志/文件内容里埋指令）
             inj = self._injection.check_tool_output(raw_output)
@@ -402,7 +452,7 @@ class AgentLoop:
                     success=False,
                     output="",
                     error=f"工具输出被注入检测阻断: {inj.reason}",
-                    elapsed_ms=(time.monotonic() - t0) * 1000,
+                    elapsed_ms=elapsed_ms,
                 )
 
             return ToolResult(
@@ -410,7 +460,7 @@ class AgentLoop:
                 tool_name=tool_name,
                 success=True,
                 output=raw_output,
-                elapsed_ms=(time.monotonic() - t0) * 1000,
+                elapsed_ms=elapsed_ms,
             )
         except Exception as e:
             return ToolResult(
@@ -442,6 +492,9 @@ class AgentLoop:
             hook_mgr=self._hook_mgr,
             messages=state.messages,
             notifications=[],
+            task_mgr=self._task_mgr,
+            error_recovery=self._error_recovery,
+            perception_agg=self._perception_agg,
         )
 
     async def _llm_call(self, system_prompt: str, messages: list[dict]):

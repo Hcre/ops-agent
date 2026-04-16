@@ -92,19 +92,23 @@ class SystemPromptBuilder:
         lines.append(f"- 权限模式: {state.permission_mode}")
         lines.append(f"- 会话轮次: {state.turn_count}")
 
-        # 感知快照只在第一轮注入（后续变化走 hook exit 2 → messages）
-        if perception and state.turn_count <= 1:
-            lines.append("\n### OS 感知快照（初始）")
-            if "disk" in perception:
-                lines.append(f"- 磁盘: {perception['disk']}")
-            if "load" in perception:
-                lines.append(f"- 负载: {perception['load']}")
-
-        # 告警始终注入（无论哪轮，告警都要让模型看到）
-        if perception and perception.get("alerts"):
-            lines.append("\n### 当前告警")
-            for alert in perception["alerts"]:
-                lines.append(f"- ⚠️ {alert}")
+        # 新格式：perception 是 ContextBuilder.build_prompt_section() 返回的字符串
+        if isinstance(perception, str) and perception.strip():
+            if state.turn_count <= 1:
+                lines.append("")
+                lines.append(perception)
+        # 旧格式兼容：perception 是 dict
+        elif isinstance(perception, dict) and state.turn_count <= 1:
+            if perception.get("alerts"):
+                lines.append("\n### 当前告警")
+                for alert in perception["alerts"]:
+                    level = alert.get("level", "INFO") if isinstance(alert, dict) else "INFO"
+                    msg = alert.get("message", str(alert)) if isinstance(alert, dict) else str(alert)
+                    prefix = {"CRITICAL": "🔴", "HIGH": "🟡", "INFO": "🔵"}.get(level, "•")
+                    lines.append(f"- {prefix} [{level}] {msg}")
+                    if isinstance(alert, dict) and alert.get("suggested_tools"):
+                        tools = "、".join(f"`{t}`" for t in alert["suggested_tools"])
+                        lines.append(f"  建议调用：{tools}")
 
         # Week 5+: 注入任务状态摘要
         # task_summary = self._task_mgr.summary()

@@ -90,7 +90,7 @@ class PermissionManager:
 ```
 security/
 ├── permission_manager.py    ← 桩 → 真实 4步管道 + 3种 mode
-├── intent_classifier.py     ← 桩 → 规则引擎 + UNKNOWN→LLM审查
+├── intent_classifier.py     ← 桩 → 规则引擎 
 ├── prompt_injection.py      ← 桩 → 真实注入检测
 └── rules/
     └── intent_rules.yaml    ← 意图分类规则文件
