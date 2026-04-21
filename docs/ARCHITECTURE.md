@@ -415,6 +415,7 @@ ops-agent/
 │   ├── DOC-2-state-resilience.md
 │   ├── DOC-3-rollback-audit.md
 │   └── DOC-4-main-loop.md
+|
 │
 ├── 📁 core/                      # [s01,s06,s08-s14,s17,s18]
 │   ├── agent_loop.py             # LoopState 主循环

@@ -26,6 +26,8 @@ from rich.spinner import Spinner, SPINNERS
 from rich.table import Table
 from rich.text import Text
 from rich import box
+from rich.markdown import Markdown
+from rich.tree import Tree
 
 
 
@@ -191,12 +193,13 @@ async def async_prompt() -> str:
 def print_answer(text: str) -> None:
     """打印 Agent 回答。"""
     console.print()
+    md = Markdown(text, code_theme="monokai")
     console.print(
         Panel(
-            Text(text, style="white"),
+            md, # 这里不再传入 Text，而是传入渲染好的 Markdown 对象
             title="[bold cyan]OpsAgent[/bold cyan]",
             border_style="cyan",
-            padding=(0, 1),
+            padding=(1, 2), # 增加一点内边距，看起来更像专业报告
         )
     )
     console.print()
@@ -248,22 +251,6 @@ def print_intent_result(result: "IntentResult") -> None:
         f"{escape(result.intent)} · "
         f"[dim]{escape(result.reason[:60])}[/dim] "
         f"[dim]({result.classifier})[/dim]"
-    )
-
-
-def print_permission_decision(
-    tool_name: str, decision: "PermissionDecision"
-) -> None:
-    """显示 PermissionManager 决策。"""
-    icons = {"allow": "✓", "ask": "?", "deny": "✗"}
-    colors = {"allow": "green", "ask": "yellow", "deny": "red"}
-    icon = icons.get(decision.behavior, "·")
-    color = colors.get(decision.behavior, "white")
-    console.print(
-        f"[{THEME['security']}]🔐 [Permission][/{THEME['security']}] "
-        f"[{color}]{icon} {decision.behavior.upper()}[/{color}] · "
-        f"[bold]{escape(tool_name)}[/bold] · "
-        f"[dim]{escape(decision.reason)}[/dim]"
     )
 
 
@@ -447,3 +434,116 @@ def print_confirm_request(
             border_style="red",
         )
     )
+
+
+# def print_thought(text: str) -> None:
+#     """打印 Agent 的思考链（Thought Stream）"""
+#     if not text.strip():
+#         return
+#     console.print(
+#         Panel(
+#             Markdown(text),
+#             title="[dim]🧠 Reasoning[/dim]",
+#             border_style="dim",
+#             padding=(0, 1),
+#         )
+#     )
+
+def print_permission_decision(
+    tool_name: str,
+    tool_input: dict,
+    decision: "PermissionDecision"
+) -> None:
+    """显示详细的权限决策，包括执行的具体命令"""
+    icons = {"allow": "✓", "ask": "?", "deny": "✗"}
+    colors = {"allow": "green", "ask": "yellow", "deny": "red"}
+    icon = icons.get(decision.behavior, "·")
+    color = colors.get(decision.behavior, "white")
+
+    payload_desc = ""
+    if tool_name == "exec_bash" and "cmd" in tool_input:
+        payload_desc = f": [bold white]'{tool_input['cmd']}'[/bold white]"
+    elif tool_input:
+        payload_desc = f": {str(tool_input)[:50]}"
+
+    console.print(
+        f"[{THEME['security']}]🔐 [Permission][/{THEME['security']}] "
+        f"[{color}]{icon} {decision.behavior.upper()}[/{color}] · "
+        f"[bold]{escape(tool_name)}[/bold]{payload_desc} · "
+        f"[dim]{escape(decision.reason)}[/dim]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 流式思考（DeepSeek-R1 reasoning_content）
+# ---------------------------------------------------------------------------
+class _ThoughtStreamer:
+    """现代极简思维链：流式显示，完成后自动收缩"""
+
+    def __init__(self) -> None:
+        self._text   = ""
+        self._t0     = 0.0
+        self._tree   = None
+        self._live   = None
+
+    def start(self) -> None:
+        from rich.tree import Tree
+        self._text = ""
+        self._t0   = time.monotonic()
+        
+        # 初始状态：使用非常淡的颜色
+        self._tree = Tree(
+            "[#444444]○ Thinking...[/#444444]", 
+            guide_style="#333333"
+        )
+        self._live = Live(self._tree, console=console, refresh_per_second=10, transient=False)
+        self._live.start()
+
+    def update(self, chunk: str) -> None:
+        if not self._live: return
+        self._text += chunk
+        elapsed = time.monotonic() - self._t0
+        
+        # 流式过程中：显示完整内容，但颜色极暗
+        self._tree.label = f"[#666666]⌄ Thought for {elapsed:.1f}s[/#666666]"
+        self._tree.children.clear()
+        
+        # 仅显示最近的思维片段，或者全部但使用 dim
+        md = Markdown(self._text)
+        self._tree.add(md, style="#555555") # 铁灰色
+
+    def stop(self) -> None:
+        if not self._live: return
+        elapsed = time.monotonic() - self._t0
+        
+        # --- 核心优化：完成后自动收缩 ---
+        # 提取第一行作为摘要
+        lines = [l for l in self._text.split('\n') if l.strip()]
+        summary = lines[0] if lines else "Logic processed"
+        if len(summary) > 60:
+            summary = summary[:57] + "..."
+            
+        # 将图标改为 › 表示收起，并只留下一行摘要
+        # 这样屏幕空间会瞬间释放，视觉重心回到具体的工具输出上
+        self._tree.label = f"[#444444]› Thought for {elapsed:.1f}s: [italic]{summary}[/italic][/#444444]"
+        self._tree.children.clear() # 清空详细内容，实现“视觉折叠”
+        
+        self._live.update(self._tree)
+        self._live.stop()
+        self._live = None
+
+# 模块级单例，agent_loop 通过 start_thought/update_thought/stop_thought 调用
+_thought_streamer = _ThoughtStreamer()
+
+
+def start_thought() -> None:
+    _thought_streamer.start()
+
+
+def update_thought(chunk: str) -> None:
+    _thought_streamer.update(chunk)
+
+
+def stop_thought() -> None:
+    _thought_streamer.stop()
+

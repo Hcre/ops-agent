@@ -31,6 +31,7 @@ async def test():
         ("rm -rf /", 'CRITICAL'),
         ("rm -r'/'f /", 'CRITICAL'),
         
+        
     ]
 
     all_pass = True

@@ -55,6 +55,7 @@ class LoopState:
     transition_reason:      str | None = None  # 上一轮为什么继续（必须显式赋值）
     permission_mode:        str   = "default"  # default / plan / auto
     stop_hook_active:       bool  = False
+    consecutive_denials:    int   = 0          # 连续权限拒绝次数，超过阈值强制终止
 
     # 任务追踪（Week 5 填充）
     active_task_id:         str | None = None  # 当前 in_progress 的 TaskRecord id
@@ -127,6 +128,8 @@ class ToolUseContext:
 
     # Week 6+: 快照回滚
     snapshot:       object = None           # Snapshot（Week 6）
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +243,8 @@ class AgentLoop:
 
     async def _handle_message(self, user_input: str, state: LoopState) -> str:
         """处理单条用户输入，返回最终回答。"""
+        # --- 官方建议：每个新问题开始前，清理历史消息中的推理内容 ---
+        self._clear_reasoning_history(state.messages)
         # Phase 1: 输入防御
         intent_result = await self._phase1_defend(user_input, state)
         if not intent_result:
@@ -293,9 +298,8 @@ class AgentLoop:
             # 调试：显示感知结果
             if result.alerts:
                 for alert in result.alerts:
-                    self._ui.console.print(
-                        f"[dim]👁 [Perception/{alert.level}][/dim] "
-                        f"[dim]{alert.message}[/dim]"
+                    self._ui.print_info(
+                        f"👁 [Perception/{alert.level}] {alert.message}"
                     )
             return section
         except Exception as e:
@@ -306,62 +310,113 @@ class AgentLoop:
     # Phase 3: LLM 推理（含 tool_use 循环）
     # ------------------------------------------------------------------
 
-    async def _phase3_reason(self, state: LoopState, perception: dict) -> str:
-        """调用 LLM，处理 tool_use 循环，返回最终文本回答。"""
+    async def _phase3_reason(self, state: LoopState, perception: str) -> str:
+        """调用 LLM，处理 tool_use 循环，返回最终文本回答。流式输出思维链。"""
         ctx = self._build_tool_use_context(state)
         system_prompt = self._prompt_builder.build(state, perception)
 
+        # tool_call 适配器（定义在循环外，避免重复创建类）
+        class _FakeFunction:
+            def __init__(self, name: str, arguments: str) -> None:
+                self.name = name
+                self.arguments = arguments
+
+        class _FakeToolCall:
+            def __init__(self, d: dict) -> None:
+                self.id = d["id"]
+                self.function = _FakeFunction(
+                    d["function"]["name"],
+                    d["function"]["arguments"],
+                )
+
         while state.turn_count < self.config.max_turns:
             state.turn_count += 1
-              # --- 这里使用 UI 动态图标 ---
-            with self._ui.generation_status():
-                # 真正的网络请求在 yield 期间执行
-                response = await self._llm_call(system_prompt, state.messages)
 
-            #response = await self._llm_call(system_prompt, state.messages)
-            choice = response.choices[0]    
-            finish_reason = choice.finish_reason
+            full_reasoning = ""
+            full_content   = ""
+            tool_calls_raw = []
+            finish_reason  = "stop"
+
+            # 流式调用：思维链实时显示，工具调用等完整响应
+            self._ui.start_thought()
+            thought_started = False
+
+            async for chunk in await self._llm_call_stream(system_prompt, state.messages):
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta is None:
+                    continue
+
+                # reasoning_content：DeepSeek-R1 思维链
+                rc = getattr(delta, "reasoning_content", None)
+                if rc:
+                    if not thought_started:
+                        thought_started = True
+                    full_reasoning += rc
+                    self._ui.update_thought(rc)
+
+                # content：正式回答
+                if delta.content:
+                    if thought_started:
+                        self._ui.stop_thought()
+                        thought_started = False
+                    full_content += delta.content
+
+                # tool_calls：工具调用（累积，不流式处理）
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        while len(tool_calls_raw) <= idx:
+                            tool_calls_raw.append({
+                                "id": "", "type": "function",
+                                "function": {"name": "", "arguments": ""}
+                            })
+                        if tc_delta.id:
+                            tool_calls_raw[idx]["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_raw[idx]["function"]["name"] += tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_raw[idx]["function"]["arguments"] += tc_delta.function.arguments
+
+                if chunk.choices and chunk.choices[0].finish_reason:
+                    finish_reason = chunk.choices[0].finish_reason
+
+            # 确保思维链 UI 已关闭
+            if thought_started:
+                self._ui.stop_thought()
 
             # 将 assistant 消息加入历史
-            assistant_msg = {"role": "assistant"}
-            if choice.message.content:
-                assistant_msg["content"] = choice.message.content
-            if choice.message.tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in choice.message.tool_calls
-                ]
+            assistant_msg: dict = {"role": "assistant", "content": full_content}
+            if full_reasoning:
+                assistant_msg["reasoning_content"] = full_reasoning
+            if tool_calls_raw:
+                assistant_msg["tool_calls"] = tool_calls_raw
             state.messages.append(assistant_msg)
 
-
-            if finish_reason == "stop" or finish_reason == "end_turn":
-                return choice.message.content or ""
+            if finish_reason in ("stop", "end_turn"):
+                return full_content
 
             if finish_reason == "tool_calls":
-                # Phase 4: 安全执行（messages 在 _phase4_execute 内部追加）
-                await self._phase4_execute(choice.message.tool_calls, ctx)
+                # 连续拒绝熔断：超过 3 次强制终止，避免 LLM 死循环
+                if state.consecutive_denials >= 3:
+                    state.consecutive_denials = 0
+                    return (
+                        "操作已被安全系统连续拒绝，无法继续执行。"
+                        "请检查权限模式（/mode）或换一种方式描述需求。"
+                    )
+
+                fake_calls = [_FakeToolCall(d) for d in tool_calls_raw]
+                await self._phase4_execute(fake_calls, ctx, state)
                 state.transition_reason = "tool_result_continuation"
                 continue
 
             if finish_reason == "length":
-                # max_tokens 截断，注入续写消息
                 state.continuation_count += 1
                 state.transition_reason = "max_tokens_recovery"
-                state.messages.append({
-                    "role": "user",
-                    "content": "请继续你的回答。",
-                })
+                state.messages.append({"role": "user", "content": "请继续你的回答。"})
                 continue
 
-            # 其他情况直接返回
-            return choice.message.content or ""
+            return full_content
 
         return "[错误] 超过最大轮次限制。"
 
@@ -370,13 +425,21 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     async def _phase4_execute(
-        self, tool_calls: list, ctx: ToolUseContext
+        self, tool_calls: list, ctx: ToolUseContext, state: LoopState | None = None
     ) -> None:
         """处理所有 tool_call，结果直接追加到 ctx.messages。"""
         for tc in tool_calls:
             result = await self._handle_single_tool(tc, ctx)
             ctx.messages.append(result.to_llm_message())
-            # 工具执行后重置感知基线，让下次感知能对比到变化
+
+            # 统计连续拒绝次数，用于熔断
+            if state is not None:
+                if not result.success and ("权限拒绝" in result.error or "需要用户确认" in result.error):
+                    state.consecutive_denials += 1
+                else:
+                    state.consecutive_denials = 0  # 成功执行则重置
+
+            # 工具执行后重置感知基线
             if ctx.perception_agg is not None:
                 ctx.perception_agg.reset_baseline()
             # hook exit 2 注入的消息也追加进去
@@ -391,14 +454,33 @@ class AgentLoop:
         PermissionManager → 工具执行 → 错误恢复 → 输出检测
         """
         tool_name = tool_call.function.name
+        raw_arguments = tool_call.function.arguments or ""
+
+        # 参数解析失败：直接返回终止性错误，不让 LLM 重试空参数
         try:
-            tool_args = json.loads(tool_call.function.arguments)
-        except json.JSONDecodeError:
-            tool_args = {}
+            tool_args = json.loads(raw_arguments) if raw_arguments.strip() else {}
+        except json.JSONDecodeError as e:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                tool_name=tool_name,
+                success=False,
+                output="",
+                error=f"工具参数 JSON 解析失败，请检查参数格式: {e}",
+            )
+
+        # exec_bash 空命令：直接拒绝，不走权限检查避免无意义循环
+        if tool_name == "exec_bash" and not tool_args.get("cmd", "").strip():
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                tool_name=tool_name,
+                success=False,
+                output="",
+                error="exec_bash 需要非空的 cmd 参数",
+            )
 
         # PermissionManager 权限检查（可视化决策）
         decision = ctx.permission_mgr.check(tool_name, tool_args)
-        self._ui.print_permission_decision(tool_name, decision)
+        self._ui.print_permission_decision(tool_name, tool_args, decision) # 传入 tool_args
 
         if decision.behavior == "deny":
             return ToolResult(
@@ -508,7 +590,7 @@ class AgentLoop:
         )
 
     async def _llm_call(self, system_prompt: str, messages: list[dict]):
-        """调用 LLM（带 system prompt）。"""
+        """调用 LLM（非流式，保留供兼容）。"""
         full_messages = [{"role": "system", "content": system_prompt}] + messages
         kwargs: dict = {
             "model": self._model_id,
@@ -517,6 +599,20 @@ class AgentLoop:
         if self._tool_schemas:
             kwargs["tools"] = self._tool_schemas
             kwargs["tool_choice"] = "auto"
+        return await self._client.chat.completions.create(**kwargs)
+
+    async def _llm_call_stream(self, system_prompt: str, messages: list[dict]):
+        """调用 LLM（流式），返回 async generator。"""
+        full_messages = [{"role": "system", "content": system_prompt}] + messages
+        kwargs: dict = {
+            "model": self._model_id,
+            "messages": full_messages,
+            "stream": True,
+        }
+        if self._tool_schemas:
+            kwargs["tools"] = self._tool_schemas
+            kwargs["tool_choice"] = "auto"
+        return await self._client.chat.completions.create(**kwargs)
 
         return await self._client.chat.completions.create(**kwargs)
 
@@ -548,3 +644,10 @@ class AgentLoop:
 
     async def _cmd_status(self, args: str, state: LoopState) -> None:
         self._ui.print_loop_state(state)
+
+    def _clear_reasoning_history(self, messages: list):
+        """对应官方 clear_reasoning_content 建议"""
+        for msg in messages:
+            if "reasoning_content" in msg:
+                # 官方示例里是设为 None，或者直接 pop 掉
+                msg.pop("reasoning_content", None)

@@ -197,6 +197,8 @@ ops-agent/
 │   ├── DOC-4-main-loop.md
 │   ├── IMPLEMENTATION_PLAN.md
 │   └── LOONGARCH_COMPAT.md
+|   |__ PRD.md
+|   |__ARCHITECTURE.md 
 │
 ├── core/                      # Harness 核心层
 │   ├── agent_loop.py          # [s01] LoopState + ToolUseContext
