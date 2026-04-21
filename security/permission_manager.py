@@ -116,10 +116,11 @@ class PermissionManager:
 
     def _classify_risk(self, cmd: str) -> str:
         """根据命令前缀判断风险等级。"""
+        cmd_stripped = cmd.strip()
         for prefix in READ_PREFIXES:
-            if cmd.startswith(prefix):
+            if cmd_stripped == prefix or cmd_stripped.startswith(prefix + " "):
                 return "LOW"
         for prefix in HIGH_RISK_PREFIXES:
-            if cmd.startswith(prefix):
+            if cmd_stripped == prefix or cmd_stripped.startswith(prefix + " "):
                 return "HIGH"
         return "MEDIUM"

@@ -412,6 +412,48 @@ async def confirm(prompt: str) -> bool:
         return False
 
 
+async def confirm_tool_execution(
+    tool_name: str,
+    tool_args: dict,
+    decision: object,
+) -> bool:
+    """暂停推理，向用户展示工具调用详情并等待确认。
+
+    MEDIUM 风险：显示说明后确认。
+    HIGH 风险：显示说明 + 要求输入 "yes"（二次确认）。
+    """
+    risk_level = getattr(decision, "risk_level", "MEDIUM")
+    reason = getattr(decision, "reason", "")
+
+    cmd = tool_args.get("cmd", "")
+    cmd_display = escape(cmd[:120] + "…" if len(cmd) > 120 else cmd)
+
+    if risk_level == "HIGH":
+        lines = [
+            f"[bold]工具:[/bold] {escape(tool_name)}",
+            f"[bold]命令:[/bold] [yellow]{cmd_display}[/yellow]",
+            f"[bold]风险:[/bold] [{THEME['error']}]HIGH[/{THEME['error']}]",
+            f"[bold]原因:[/bold] {escape(reason)}",
+            "",
+            "[dim]此操作需要二次确认，请输入 \"yes\" 继续：[/dim]",
+        ]
+        console.print(Panel("\n".join(lines), title="[bold red]⚠ 高危操作[/bold red]", border_style="red"))
+        try:
+            ans = await _pt_session.prompt_async(HTML('<ansired><b>确认 (yes/N): </b></ansired>'))
+            return ans.strip().lower() == "yes"
+        except (EOFError, KeyboardInterrupt, KeyError):
+            return False
+    else:
+        lines = [
+            f"[bold]工具:[/bold] {escape(tool_name)}",
+            f"[bold]命令:[/bold] [cyan]{cmd_display}[/cyan]",
+            f"[bold]风险:[/bold] [{THEME['warning']}]MEDIUM[/{THEME['warning']}]",
+            f"[bold]原因:[/bold] {escape(reason)}",
+        ]
+        console.print(Panel("\n".join(lines), title="[bold yellow]ℹ 操作确认[/bold yellow]", border_style="yellow"))
+        return await confirm("确认执行?")
+
+
 def print_confirm_request(
     tool_name: str,
     risk_level: str,

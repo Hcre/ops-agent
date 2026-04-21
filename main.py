@@ -48,6 +48,21 @@ def _check_privilege_users() -> None:
     pass
 
 
+def _init_privilege_broker(config: object) -> None:
+    """初始化 PrivilegeBroker 并注入到 exec_tools。
+
+    sudo 环境未就绪时打印警告并继续（开发环境回退到直接执行）。
+    """
+    from security.privilege_broker import PrivilegeBroker
+    from tools.exec_tools import set_privilege_broker
+    try:
+        broker = PrivilegeBroker(config)
+        set_privilege_broker(broker)
+        print("[安全] PrivilegeBroker 初始化成功，最小权限执行已启用")
+    except RuntimeError as e:
+        print(f"[警告] PrivilegeBroker 初始化失败，回退到直接执行（仅限开发环境）:\n{e}")
+
+
 async def main() -> None:
     _check_env()
     _check_privilege_users()
@@ -56,6 +71,7 @@ async def main() -> None:
     from core.agent_loop import AgentLoop
 
     config = AgentConfig()
+    _init_privilege_broker(config)
     loop = AgentLoop(config)
     await loop.run()
 

@@ -492,13 +492,17 @@ class AgentLoop:
             )
 
         if decision.behavior == "ask":
-            return ToolResult(
-                tool_call_id=tool_call.id,
-                tool_name=tool_name,
-                success=False,
-                output="",
-                error=f"需要用户确认: {decision.reason}",
-            )
+            # 暂停推理，等待用户终端确认（DOC-7 遗留问题 #6）
+            confirmed = await self._ui.confirm_tool_execution(tool_name, tool_args, decision)
+            if not confirmed:
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    tool_name=tool_name,
+                    success=False,
+                    output="",
+                    error=f"用户拒绝执行: {decision.reason}",
+                )
+            # 用户确认后继续往下执行，不 return
 
         # 查找 handler
         handler = ctx.handlers.get(tool_name)
@@ -578,6 +582,7 @@ class AgentLoop:
 
     def _build_tool_use_context(self, state: LoopState) -> ToolUseContext:
         """每轮构建工具执行上下文总线。"""
+        from tools.exec_tools import _broker
         return ToolUseContext(
             handlers=self._tool_handlers,
             permission_mgr=self._perm_mgr,
@@ -587,6 +592,7 @@ class AgentLoop:
             task_mgr=self._task_mgr,
             error_recovery=self._error_recovery,
             perception_agg=self._perception_agg,
+            broker=_broker,
         )
 
     async def _llm_call(self, system_prompt: str, messages: list[dict]):
@@ -612,8 +618,6 @@ class AgentLoop:
         if self._tool_schemas:
             kwargs["tools"] = self._tool_schemas
             kwargs["tool_choice"] = "auto"
-        return await self._client.chat.completions.create(**kwargs)
-
         return await self._client.chat.completions.create(**kwargs)
 
     async def _cli_confirm_intent(self, user_input: str, result) -> bool:

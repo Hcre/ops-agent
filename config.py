@@ -166,11 +166,34 @@ ABSOLUTE_BLACKLIST: list[str] = [
 
 # 只读命令前缀（risk=read，自动放行）
 READ_PREFIXES: list[str] = [
-    "df", "du", "ls", "cat", "head", "tail", "grep", "find",
-    "ps", "top", "htop", "netstat", "ss", "lsof", "journalctl",
-    "systemctl status", "systemctl list",
-    "free", "uptime", "who", "w", "last",
-    "stat", "file", "wc", "md5sum", "sha256sum",
+    # 目录/路径
+    "pwd", "cd",
+    # 磁盘/文件系统
+    "df", "du", "ls", "cat", "head", "tail", "less", "more",
+    "find", "locate", "stat", "file", "wc", "md5sum", "sha256sum",
+    "readlink", "realpath", "basename", "dirname",
+    # 进程/系统
+    "ps", "top", "htop", "pgrep", "pstree",
+    "free", "uptime", "who", "w", "last", "lastlog",
+    "uname", "hostname", "date", "timedatectl", "cal",
+    "id", "whoami", "groups", "ulimit",
+    # 网络（只读）
+    "netstat", "ss", "lsof", "ip addr", "ip route", "ip link",
+    "ifconfig", "ping", "traceroute", "nslookup", "dig", "host",
+    "curl", "wget",
+    # 日志/服务状态
+    "journalctl", "dmesg",
+    "systemctl status", "systemctl list", "systemctl is-",
+    "service --status",
+    # 文本处理
+    "grep", "egrep", "fgrep", "awk", "sed", "sort", "uniq",
+    "cut", "tr", "echo", "printf", "xargs",
+    # 包/环境信息
+    "which", "whereis", "type", "env", "printenv",
+    "dpkg -l", "dpkg -s", "rpm -q", "apt list",
+    "python", "python3", "pip", "pip3",
+    # 其他只读
+    "man", "help", "history", "alias",
 ]
 
 # 高危命令前缀（risk=high，必须确认）

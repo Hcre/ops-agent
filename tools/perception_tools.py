@@ -268,7 +268,7 @@ async def get_logs(
 
     ok, out, code = await _run(cmd, timeout=15)
     if not ok:
-        return _result("get_logs", t0, False, "", out)
+        return _result("get_logs", t0, False, "", error=out)
 
     lines = out.splitlines()
     lines = _detect_stacktrace(lines, actual_n)
