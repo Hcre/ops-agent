@@ -26,6 +26,28 @@ if TYPE_CHECKING:
     from config import AgentConfig
 
 RiskLevel = Literal["MEDIUM", "HIGH", "CRITICAL"]
+CmdCategory = Literal["read", "file", "service", "unknown"]
+
+
+@dataclass
+class CommandRiskResult:
+    """tool_call 层的结构化审查结果，由 classify_command() 输出。"""
+    risk_level:       Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    reason:           str
+    blast_radius:     str
+    reversible:       bool
+    needs_human:      bool
+    suggested_action: str
+    classifier:       Literal["rule", "llm", "default"]
+    category:         CmdCategory = "read"   # 决定路由到哪个 ops-* 账号
+    context:          str = "default"        # 预留多租户扩展，默认 "default"
+
+    @property
+    def target_user(self) -> str:
+        """组合成最终的 OS 账号名，供 PrivilegeBroker 使用。"""
+        if self.context == "default":
+            return f"ops-{self.category}"
+        return f"ops-{self.category}-{self.context}"
 
 
 @dataclass

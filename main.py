@@ -6,6 +6,9 @@ main.py — OpsAgent REPL 入口
 2. 检查 ops-reader(uid=9001) / ops-writer(uid=9002) 系统账号（Week 4 启用）
 3. 初始化 AgentLoop
 4. 进入主 REPL 循环
+
+MCP 模式：python main.py --mcp
+  以 stdio 模式启动 MCP Server，供外部 MCP 客户端调用。
 """
 from __future__ import annotations
 
@@ -69,12 +72,28 @@ async def main() -> None:
 
     from config import AgentConfig
     from core.agent_loop import AgentLoop
+    from tools.registry import ToolRegistry
+    from tools.mcp_client import MCPClientManager
 
     config = AgentConfig()
     _init_privilege_broker(config)
-    loop = AgentLoop(config)
-    await loop.run()
+
+    # 初始化 MCP Client，连接外部 Server 并注册工具
+    registry = ToolRegistry()
+    mcp_client = MCPClientManager(registry)
+    await mcp_client.start()
+
+    loop = AgentLoop(config, registry=registry)
+    try:
+        await loop.run()
+    finally:
+        await mcp_client.stop()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if "--mcp" in sys.argv:
+        # MCP Server 模式：stdio 传输，供外部 MCP 客户端调用
+        from tools.mcp_server import mcp
+        mcp.run(transport="stdio")
+    else:
+        asyncio.run(main())

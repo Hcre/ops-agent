@@ -146,7 +146,7 @@ class AgentLoop:
     - 工具执行框架（Week 2+ 填充真实工具）
     """
 
-    def __init__(self, config: AgentConfig) -> None:
+    def __init__(self, config: AgentConfig, registry=None) -> None:
         self.config = config
         profile = config.get_model_profile()
 
@@ -181,8 +181,9 @@ class AgentLoop:
         self._perception_agg = PerceptionAggregator(config)
         self._error_recovery = ErrorRecovery(config)
 
-        # 工具注册表（Week 2+ 填充）
-        registry = ToolRegistry()
+        # 工具注册表：优先使用外部传入的（含 MCP 工具），否则新建
+        if registry is None:
+            registry = ToolRegistry()
         self._tool_handlers = registry.handlers
         self._tool_schemas = registry.get_schemas()
 

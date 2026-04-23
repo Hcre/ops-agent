@@ -58,7 +58,7 @@ create_group() {
         sudo groupdel "$grp" 2>/dev/null || true
     fi
     sudo groupadd --system "$grp"
-    sudo usermod -aG "$grp" "$RUNNER_USER"
+    # sudo usermod -aG "$grp" "$RUNNER_USER"
     sudo usermod -aG "$grp" "$member"
     ok "创建组: ${grp}  成员: ${RUNNER_USER}, ${member}"
 }
