@@ -19,7 +19,7 @@ from config import AgentConfig, MODEL_PROFILES
 if TYPE_CHECKING:
     from core.hook_manager import HookManager
     from core.system_prompt import SystemPromptBuilder
-    from security.intent_classifier import IntentClassifier, IntentResult
+    from security.intent_classifier import IntentClassifier, IntentResult, CommandRiskResult
     from security.permission_manager import PermissionManager
     from security.prompt_injection import PromptInjectionDetector
     from managers.task_manager import TaskManager
@@ -103,11 +103,12 @@ class ToolUseContext:
     """工具控制平面的共享环境总线。
     所有工具通过此总线访问运行时状态，不直接访问全局变量。
     """
-    handlers:       dict                    # tool_name → handler callable
-    permission_mgr: "PermissionManager"
-    hook_mgr:       "HookManager"
+    handlers:          dict                    # tool_name → handler callable
+    permission_mgr:    "PermissionManager"
+    hook_mgr:          "HookManager"
     messages:       list[dict]              # 当前对话历史（只读引用）
     notifications:  list[str]              # hook exit 2 注入的消息
+    intent_classifier: "IntentClassifier" = None
     cwd:            str = "."
 
     # Week 2: 错误恢复 + 感知 + 任务管理
@@ -452,7 +453,7 @@ class AgentLoop:
         """单个 tool_call 的完整安全管道，返回 ToolResult。
 
         完整管道（Week 2 实现）：
-        PermissionManager → 工具执行 → 错误恢复 → 输出检测
+        IntentClassifier（风险分类）→ PermissionManager（权限决策）→ 工具执行 → 错误恢复 → 输出检测
         """
         tool_name = tool_call.function.name
         raw_arguments = tool_call.function.arguments or ""
@@ -479,9 +480,15 @@ class AgentLoop:
                 error="exec_bash 需要非空的 cmd 参数",
             )
 
-        # PermissionManager 权限检查（可视化决策）
-        decision = ctx.permission_mgr.check(tool_name, tool_args)
-        self._ui.print_permission_decision(tool_name, tool_args, decision) # 传入 tool_args
+        # 安全管道：IntentClassifier → PermissionManager
+        # 先做命令风险分类，再做权限决策
+        risk_result = None
+        if tool_name == "exec_bash":
+            cmd = tool_args.get("cmd", "").strip()
+            if ctx.intent_classifier is not None:
+                risk_result = await ctx.intent_classifier.classify_command(cmd)
+        decision = ctx.permission_mgr.check(tool_name, tool_args, risk_result=risk_result)
+        self._ui.print_permission_decision(tool_name, tool_args, decision)
 
         if decision.behavior == "deny":
             return ToolResult(
@@ -587,6 +594,7 @@ class AgentLoop:
         return ToolUseContext(
             handlers=self._tool_handlers,
             permission_mgr=self._perm_mgr,
+            intent_classifier=self._intent,
             hook_mgr=self._hook_mgr,
             messages=state.messages,
             notifications=[],

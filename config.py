@@ -48,6 +48,14 @@ MODEL_PROFILES: dict[str, dict] = {
         "context_limit": 32000,
         "max_tools_per_request": 64,
     },
+    "deepseek-v4-flash": {
+        "model_id": "deepseek-v4-flash",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "supports_thinking": False,
+        "context_limit": 64000,
+        "max_tools_per_request": 0,
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -124,6 +132,14 @@ class AgentConfig:
                 f"Available: {list(MODEL_PROFILES.keys())}"
             )
         return MODEL_PROFILES[self.model_profile]
+
+    def get_security_reviewer_profile(self) -> dict:
+        if self.security_reviewer_model not in MODEL_PROFILES:
+            raise ValueError(
+                f"Unknown security reviewer model: {self.security_reviewer_model}. "
+                f"Available: {list(MODEL_PROFILES.keys())}"
+            )
+        return MODEL_PROFILES[self.security_reviewer_model]
 
     def get_api_key(self) -> str:
         profile = self.get_model_profile()

@@ -26,7 +26,6 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from config import AgentConfig
-    from security.intent_classifier import CommandRiskResult
 
 logger = logging.getLogger(__name__)
 
@@ -79,37 +78,39 @@ class PrivilegeBroker:
     def execute(
         self,
         cmd: str,
-        cmd_type: str,
         op_id: str,
-        timeout: int = 30,
-        risk_result: "CommandRiskResult | None" = None,
+        privilege: Privilege,
+        timeout: int | None = None,
     ) -> ExecResult:
-        """根据审查结果选择账号，写入临时脚本，sudo 执行，返回结果。
+        """以指定权限账号执行命令。
 
-        优先使用 risk_result.target_user 确定账号（审查员显式路由）。
-        无 risk_result 时回退到 cmd_type 字符串映射（兼容旧调用）。
+        privilege 由调用方（PermissionManager / ToolRegistry）静态决定，
+        不接受来自 LLM 的 cmd_type 字符串，消除 LLM 控制执行账号的攻击面。
+
+        默认无超时限制，由用户自行 Ctrl+C 中断。后台/auto 模式可通过
+        timeout 参数显式设置上限。
         """
-        if risk_result is not None:
-            privilege = self._resolve_privilege(risk_result.category)
-            user = risk_result.target_user
-        else:
-            privilege = self._resolve_privilege(cmd_type)
-            user = _PRIVILEGE_TO_USER[privilege]
-
+        user = _PRIVILEGE_TO_USER[privilege]
         script_path = self._write_script(cmd, privilege, op_id)
         safe_env = self._build_safe_env()
         t0 = time.monotonic()
 
+        # 构建命令数组：无超时时跳过 timeout wrapper
+        cmd_parts: list[str] = [self._sudo_path, "-u", user]
+        if timeout is not None:
+            cmd_parts.extend(["timeout", str(timeout)])
+        cmd_parts.extend(["/bin/bash", str(script_path)])
+
         try:
             result = subprocess.run(
-                [self._sudo_path, "-u", user, "timeout", str(timeout), "/bin/bash", str(script_path)],
+                cmd_parts,
                 capture_output=True,
                 text=True,
-                timeout=timeout + 5,
+                timeout=timeout + 5 if timeout is not None else None,
                 env=safe_env,
             )
             elapsed_ms = (time.monotonic() - t0) * 1000
-            timed_out = (result.returncode == 124)
+            timed_out = (timeout is not None and result.returncode == 124)
             return ExecResult(
                 success=(result.returncode == 0),
                 stdout=result.stdout,
@@ -135,22 +136,21 @@ class PrivilegeBroker:
         finally:
             self._cleanup(script_path)
 
-    def _resolve_privilege(self, cmd_type: str) -> Privilege:
-        """cmd_type 决定账号，未知类型保守降级到 reader。
+    @staticmethod
+    def category_to_privilege(category: str) -> Privilege:
+        """将 ToolRegistry 的 category 映射到 Privilege。
 
-        read    → ops-reader   (df/ps/cat/ls/journalctl)
-        file    → ops-file     (rm/mv/cp/tar)
-        service → ops-service  (systemctl/chmod/kill)
-        未知    → ops-reader   (保守降级，不用高权限账号执行未知命令)
+        category 来自工具注册时的静态声明或 CommandRiskResult（规则引擎输出），
+        不来自 LLM。未知 category 保守降级到 reader。
         """
         mapping: dict[str, Privilege] = {
-            "read": "reader",
-            "file": "file",
+            "read":    "reader",
+            "file":    "file",
             "service": "service",
         }
-        privilege = mapping.get(cmd_type)
+        privilege = mapping.get(category)
         if privilege is None:
-            logger.warning("未知 cmd_type=%r，降级到 reader 账号", cmd_type)
+            logger.warning("未知 category=%r，降级到 reader 账号", category)
             return "reader"
         return privilege
 
@@ -317,3 +317,4 @@ class PrivilegeBroker:
         except Exception as e:
             logger.warning("脚本清理失败 %s: %s", script_path, e)
         pass
+

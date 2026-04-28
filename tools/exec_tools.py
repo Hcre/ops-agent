@@ -26,12 +26,12 @@ def set_privilege_broker(broker: "PrivilegeBroker") -> None:
     _broker = broker
 
 
-async def exec_bash(cmd: str, timeout: float = 30.0, cmd_type: str = "read") -> ToolResult:
+async def exec_bash(cmd: str, timeout: float | None = None, cmd_type: str = "read") -> ToolResult:
     """执行单条 bash 命令。
 
     Args:
         cmd: bash 命令字符串（支持管道/重定向）
-        timeout: 超时秒数（默认 30s）
+        timeout: 超时秒数，None 表示无限制（默认无超时，由用户自行中断）
         cmd_type: 命令类型 read/file/service，决定使用哪个受限账号
 
     Returns:
@@ -40,7 +40,7 @@ async def exec_bash(cmd: str, timeout: float = 30.0, cmd_type: str = "read") -> 
     tool_call_id = str(uuid.uuid4())[:8]
 
     if _broker is not None:
-        return await _exec_via_broker(cmd, cmd_type, tool_call_id, int(timeout))
+        return await _exec_via_broker(cmd, cmd_type, tool_call_id, int(timeout) if timeout is not None else None)
     else:
         logger.warning("PrivilegeBroker 未初始化，回退到直接执行（仅限开发环境）")
         return await _exec_direct(cmd, timeout, tool_call_id)
@@ -50,17 +50,20 @@ async def _exec_via_broker(
     cmd: str,
     cmd_type: str,
     tool_call_id: str,
-    timeout: int,
+    timeout: int | None,
 ) -> ToolResult:
-    """通过 PrivilegeBroker 以受限账号执行命令。"""
-    if _broker is None:
-        raise RuntimeError("PrivilegeBroker 未初始化")  # 主动失败而非静默回退
-    loop = asyncio.get_event_loop()
+    """通过 PrivilegeBroker 以受限账号执行命令。
 
-    # PrivilegeBroker.execute 是同步阻塞调用，放到线程池避免阻塞事件循环
+    cmd_type 由 PermissionManager 判断后传入，在此转换为 Privilege，
+    不接受来自 LLM 的原始字符串直接控制执行账号。
+    """
+    from security.privilege_broker import PrivilegeBroker
+    privilege = PrivilegeBroker.category_to_privilege(cmd_type)
+
+    loop = asyncio.get_event_loop()
     exec_result = await loop.run_in_executor(
         None,
-        lambda: _broker.execute(cmd, cmd_type, tool_call_id, timeout),  # type: ignore[union-attr]
+        lambda: _broker.execute(cmd, tool_call_id, privilege, timeout),  # type: ignore[union-attr]
     )
 
     if exec_result.success:
@@ -85,7 +88,7 @@ async def _exec_via_broker(
         )
 
 
-async def _exec_direct(cmd: str, timeout: float, tool_call_id: str) -> ToolResult:
+async def _exec_direct(cmd: str, timeout: float | None, tool_call_id: str) -> ToolResult:
     """直接执行（无权限隔离，仅用于开发/测试环境）。"""
     t0 = time.monotonic()
     try:
@@ -95,9 +98,9 @@ async def _exec_direct(cmd: str, timeout: float, tool_call_id: str) -> ToolResul
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout,
+            coro = process.communicate()
+            stdout, stderr = await (
+                asyncio.wait_for(coro, timeout=timeout) if timeout is not None else coro
             )
         except asyncio.TimeoutError:
             process.kill()

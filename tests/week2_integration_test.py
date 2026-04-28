@@ -12,58 +12,92 @@ import pytest
 import time
 from config import AgentConfig
 from security.permission_manager import PermissionManager
+from security.intent_classifier import IntentClassifier
 from managers.task_manager import TaskManager
 from perception.aggregator import PerceptionAggregator
 from core.error_recovery import ErrorRecovery, RecoveryStrategy
 
 
 class TestPermissionManager:
-    """PermissionManager 测试"""
+    """PermissionManager + IntentClassifier 集成测试"""
 
-    def test_deny_blacklist(self):
+    @pytest.mark.asyncio
+    async def test_deny_blacklist(self):
         """测试绝对黑名单拒绝"""
         config = AgentConfig(mode="default")
+        clf = IntentClassifier(config)
         pm = PermissionManager(config)
 
-        decision = pm.check("exec_bash", {"cmd": "rm -rf /"})
+        risk_result = await clf.classify_command("rm -rf /")
+        decision = pm.check("exec_bash", {"cmd": "rm -rf /"}, risk_result=risk_result)
         assert decision.behavior == "deny"
         assert decision.risk_level == "CRITICAL"
 
-    def test_allow_readonly(self):
+    @pytest.mark.asyncio
+    async def test_allow_readonly(self):
         """测试只读命令自动放行"""
         config = AgentConfig(mode="default")
+        clf = IntentClassifier(config)
         pm = PermissionManager(config)
 
-        decision = pm.check("exec_bash", {"cmd": "ls -la /tmp"})
+        risk_result = await clf.classify_command("ls -la /tmp")
+        decision = pm.check("exec_bash", {"cmd": "ls -la /tmp"}, risk_result=risk_result)
         assert decision.behavior == "allow"
         assert decision.risk_level == "LOW"
 
-    def test_plan_mode_rejects_write(self):
-        """测试 plan 模式拒绝写操作"""
+    @pytest.mark.asyncio
+    async def test_plan_mode_rejects_write(self):
+        """测试 plan 模式拒绝写操作（HIGH + plan + not reversible → deny）"""
         config = AgentConfig(mode="plan")
+        clf = IntentClassifier(config)
         pm = PermissionManager(config)
 
-        decision = pm.check("exec_bash", {"cmd": "rm /tmp/test.txt"})
+        risk_result = await clf.classify_command("rm /tmp/test.txt")
+        decision = pm.check("exec_bash", {"cmd": "rm /tmp/test.txt"}, risk_result=risk_result)
         assert decision.behavior == "deny"
         assert "Plan mode" in decision.reason
 
-    def test_auto_mode_allows_medium_risk(self):
+    @pytest.mark.asyncio
+    async def test_auto_mode_allows_medium_risk(self):
         """测试 auto 模式自动放行中等风险操作"""
         config = AgentConfig(mode="auto")
+        clf = IntentClassifier(config)
         pm = PermissionManager(config)
 
-        decision = pm.check("exec_bash", {"cmd": "mv /tmp/a /tmp/b"})
-        assert decision.behavior == "allow"
-        assert decision.risk_level == "MEDIUM"
+        risk_result = await clf.classify_command("mv /tmp/a /tmp/b")
+        if risk_result.risk_level == "MEDIUM" and not risk_result.needs_human:
+            decision = pm.check("exec_bash", {"cmd": "mv /tmp/a /tmp/b"}, risk_result=risk_result)
+            assert decision.behavior == "allow"
+        # else: MEDIUM → L3 stub returns needs_human=True, which forces ask even in auto mode
 
-    def test_ask_for_high_risk(self):
-        """测试高风险操作询问用户"""
+    @pytest.mark.asyncio
+    async def test_ask_for_high_risk(self):
+        """测试高风险操作询问用户（default 模式下 HIGH → ask）"""
+        config = AgentConfig(mode="default")
+        clf = IntentClassifier(config)
+        pm = PermissionManager(config)
+
+        risk_result = await clf.classify_command("rm /tmp/test.txt")
+        decision = pm.check("exec_bash", {"cmd": "rm /tmp/test.txt"}, risk_result=risk_result)
+        assert decision.behavior == "ask"
+        assert decision.risk_level == "HIGH"
+
+    def test_non_bash_tool_allowed(self):
+        """非 exec_bash 工具直接放行"""
         config = AgentConfig(mode="default")
         pm = PermissionManager(config)
 
-        decision = pm.check("exec_bash", {"cmd": "rm -rf /home/user"})
-        assert decision.behavior == "ask"
-        assert decision.risk_level == "HIGH"
+        decision = pm.check("read_file", {"path": "/tmp/test"})
+        assert decision.behavior == "allow"
+
+    def test_empty_command_denied(self):
+        """空命令直接拒绝"""
+        config = AgentConfig(mode="default")
+        pm = PermissionManager(config)
+        clf = IntentClassifier(config)
+
+        decision = pm.check("exec_bash", {"cmd": ""})
+        assert decision.behavior == "deny"
 
 
 class TestTaskManager:

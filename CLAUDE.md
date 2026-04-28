@@ -29,15 +29,12 @@
 | `docs/` | DESIGN.md / DOC-1~4 / IMPLEMENTATION_PLAN.md | — |
 
 ## 关键约束（从代码看不出来的）
-
 - `deepseek-reasoner`（R1 思维链）**不支持 function calling**，工具调用必须用 `deepseek-chat`
 - `LoopState.transition_reason` 必须显式赋值，不能只写 `continue`（见 `s00c`）
 - `TaskRecord`（工作图目标）≠ `RuntimeTaskState`（执行槽位），不能混用（见 `s13a`）
 - 工具执行通过 `ToolUseContext` 总线传递共享环境，不直接访问全局变量（见 `s02a`）
 
-
 ## 参考资料
-
 遇到设计问题先查 `docs/`（本项目设计文档），再查 learn-claude-code（路径：`../learn-claude-code/docs/zh/`）。
 
 | 文件 | 何时查 |
@@ -51,10 +48,7 @@
 | `s19a-mcp-capability-layers.md` | 扩展 MCP 接入层时 |
 | `data-structures.md` | 新增任何 dataclass 前先对照标准形状 |
 | `entity-map.md` | 概念边界混淆时（Todo/Task/RuntimeTask/Subagent）|
-
-
 # CLAUDE.md
-
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
